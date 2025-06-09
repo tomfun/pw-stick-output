@@ -1,0 +1,16 @@
+../node_modules
+
+/.cache
+/build
+/app/build
+/public/build/
+/public/_dev
+/app/public/build
+localstack/volume
+*.env
+.env.*
+dist
+.DS_STORE
+/app/types/
+/extensions/katalys-pixel/src/index.ts
+/extensions/katalys-pixel/src/out-shopify.js
