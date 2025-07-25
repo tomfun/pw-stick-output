@@ -1,8 +1,4 @@
 node_modules
-build
-public/build
-shopify-app-remix
-*/*.yml
-.shopify
-/app/types/
-/extensions/*/dist
+node_modules/
+dist/
+coverage/

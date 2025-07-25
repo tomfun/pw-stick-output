@@ -1,6 +1,6 @@
 {
   "name": "pw-stick-output",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "description": "TypeScript utility for managing PipeWire audio node connections and routing with systemd integration",
   "main": "dist/index.js",
@@ -30,7 +30,9 @@
     "build:watch": "tsc --watch",
     "build": "tsc",
     "prepublishOnly": "npm run build",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest",
+    "test:watch": "npm run test -- --watch",
+    "test:coverage": "npm run test -- --coverage"
   },
   "author": "tomfun",
   "license": "MIT",
@@ -62,6 +64,7 @@
   "devDependencies": {
     "@remix-run/eslint-config": "^2.16.0",
     "@types/eslint": "^9.6.1",
+    "@types/jest": "^30.0.0",
     "@types/lodash": "^4.17.17",
     "@types/minimist": "^1.2.5",
     "@types/node": "^18.19.103",
@@ -70,7 +73,9 @@
     "eslint": "^8.57.1",
     "eslint-config-prettier": "^10.1.1",
     "eslint-plugin-prettier": "^5.2.3",
+    "jest": "^30.0.5",
     "prettier": "^3.5.3",
+    "ts-jest": "^29.4.0",
     "typescript": "^5.8.3"
   }
 }
