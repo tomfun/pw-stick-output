@@ -1,0 +1,15 @@
+[Unit]
+Description=Pipewire Audio Sink Manager
+After=pipewire.service
+
+[Service]
+Environment=SYSLOG_IDENTIFIER=pw-stick-output.service
+Environment=SYSLOG_LEVEL=error
+Type=notify
+#ExecStart=/usr/local/nvm/versions/node/v22.14.0/bin/node --title pw-stick-output --watch --enable-source-maps --abort-on-uncaught-exception %h/prj/tomfun/infrastructure/pulse_audio/pw-stick-output/dist/findModuleByName.js
+ExecStart=/usr/local/nvm/versions/node/v22.14.0/bin/node --title pw-stick-output --enable-source-maps --abort-on-uncaught-exception %h/prj/tomfun/infrastructure/pulse_audio/pw-stick-output/dist/index.js --config %h/prj/tomfun/infrastructure/pulse_audio/pw-stick-output-config.cjs
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

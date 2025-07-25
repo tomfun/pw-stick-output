@@ -2,17 +2,45 @@
   "name": "pw-stick-output",
   "version": "0.0.1",
   "type": "module",
-  "description": "stick pipewire nodes to outputs",
+  "description": "TypeScript utility for managing PipeWire audio node connections and routing with systemd integration",
   "main": "dist/index.js",
+  "keywords": [
+    "pipewire",
+    "audio",
+    "routing",
+    "linux",
+    "systemd",
+    "audio-processing",
+    "wireplumber"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tomfun/pw-stick-output.git"
+  },
+  "homepage": "https://github.com/tomfun/pw-stick-output#readme",
+  "bugs": {
+    "url": "https://github.com/tomfun/pw-stick-output/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
-    "start": "node dist/index.ts",
-    "dev": "concurrently \"npm run build:watch\" \"nodemon dist/index.cjs\"",
+    "start": "node dist/index.js",
+    "dev": "concurrently \"npm run build:watch\" \"nodemon dist/index.js\"",
     "build:watch": "tsc --watch",
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "tomfun",
   "license": "MIT",
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "exampleConfig.cjs",
+    "pw-stick-output.service"
+  ],
   "exports": {
     ".": {
       "import": "./dist/index.js",
@@ -21,7 +49,7 @@
     },
     "./configHelper": {
       "import": "./dist/configHelper.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/configHelper.d.ts"
     },
     "./package.json": "./package.json"
   },
