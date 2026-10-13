@@ -1,9 +1,12 @@
 import type { BaseBlock } from './findModuleByName.js';
 import {
+  createRoutingEventFilter,
   extractInfoProperties,
   filterBlocksBy,
   mergeClientProps,
   mergeDiffs,
+  monInterfaceType,
+  parseMonitoringBlock,
   resolveEndpoint,
 } from './findModuleByName.js';
 
@@ -331,6 +334,72 @@ describe('findModuleByName', () => {
         { from: '2:a:out_FR', add: ['6:b:in_FR'], rm: ['7:c:in_FR'] },
       ]);
       expect(merged).toHaveLength(2);
+    });
+  });
+
+  describe('createRoutingEventFilter', () => {
+    // Blocks as printed by `pw-mon --no-colors --hide-props --hide-params`
+    const added = (id: string, type: string) =>
+      parseMonitoringBlock(`added:\n\tid: ${id}\n\tpermissions: rwxm-\n\ttype: PipeWire:Interface:${type} (version 3)`);
+    const changed = (id: string, type: string) =>
+      parseMonitoringBlock(`changed:\n\tid: ${id}\n\tpermissions: rwxm-\n\ttype: PipeWire:Interface:${type} (version 3)`);
+    const removed = (id: string) => parseMonitoringBlock(`removed:\n\tid: ${id}`);
+
+    it('extracts the short interface type', () => {
+      expect(monInterfaceType('PipeWire:Interface:Port (version 3)')).toBe('Port');
+      expect(monInterfaceType(undefined)).toBeUndefined();
+    });
+
+    it('ignores the full lifecycle of a pw-cli/pw-link client', () => {
+      const isRouting = createRoutingEventFilter();
+      expect([added('341', 'Client'), changed('341', 'Client'), removed('341')].map(isRouting)).toEqual([
+        false,
+        false,
+        false,
+      ]);
+    });
+
+    it('ignores other non-routing objects', () => {
+      const isRouting = createRoutingEventFilter();
+      for (const type of ['Module', 'Factory', 'Metadata', 'Core', 'Profiler', 'SecurityContext']) {
+        expect(isRouting(added('7', type))).toBe(false);
+      }
+    });
+
+    it('passes node, port, link and device events', () => {
+      const isRouting = createRoutingEventFilter();
+      expect(isRouting(added('52', 'Node'))).toBe(true);
+      expect(isRouting(added('180', 'Port'))).toBe(true);
+      expect(isRouting(changed('180', 'Port'))).toBe(true);
+      expect(isRouting(added('234', 'Link'))).toBe(true);
+      expect(isRouting(changed('44', 'Device'))).toBe(true);
+    });
+
+    it('passes removal of a link or port by its remembered type', () => {
+      const isRouting = createRoutingEventFilter();
+      isRouting(added('234', 'Link'));
+      isRouting(added('180', 'Port'));
+      expect(isRouting(removed('234'))).toBe(true);
+      expect(isRouting(removed('180'))).toBe(true);
+    });
+
+    it('tracks reused ids', () => {
+      const isRouting = createRoutingEventFilter();
+      isRouting(added('165', 'Client'));
+      isRouting(removed('165'));
+      expect(isRouting(added('165', 'Link'))).toBe(true);
+      expect(isRouting(removed('165'))).toBe(true);
+      isRouting(added('165', 'Client'));
+      expect(isRouting(removed('165'))).toBe(false);
+    });
+
+    it('passes removal of an unknown id to be safe', () => {
+      expect(createRoutingEventFilter()(removed('999'))).toBe(true);
+    });
+
+    it('ignores blocks without an action or id', () => {
+      const isRouting = createRoutingEventFilter();
+      expect(isRouting(parseMonitoringBlock('\ttype: PipeWire:Interface:Core\n\tcookie: 1'))).toBe(false);
     });
   });
 });

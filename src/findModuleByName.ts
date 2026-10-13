@@ -265,6 +265,36 @@ export function parseMonitoringBlock(text: string): MonBlock {
   return result;
 }
 
+/** `PipeWire:Interface:Port (version 3)` -> `Port` */
+export function monInterfaceType(type: string | null | undefined): string | undefined {
+  return type?.match(/^PipeWire:Interface:(\w+)/)?.[1];
+}
+
+// Only these object types can change what is linked to what. Everything else (Client, Module,
+// Factory, Metadata, …) is noise; Client events in particular come from our own pw-cli/pw-link
+// calls, so reacting to them makes every rescan schedule the next one.
+const ROUTING_TYPES = new Set(['Node', 'Port', 'Link', 'Device']);
+
+/**
+ * Returns a predicate telling whether a pw-mon block may affect routing. `removed` blocks carry
+ * only the id, so the type is remembered from the `added`/`changed` blocks of that id;
+ * a removal of an id never seen before is passed through to be safe.
+ */
+export function createRoutingEventFilter(): (block: MonBlock) => boolean {
+  const typeById = new Map<string, string>();
+  return (block) => {
+    if (!block._changedType || !block.id) return false;
+    let type = monInterfaceType(block.type);
+    if (block._changedType === 'removed') {
+      type = typeById.get(block.id);
+      typeById.delete(block.id);
+    } else if (type) {
+      typeById.set(block.id, type);
+    }
+    return type === undefined || ROUTING_TYPES.has(type);
+  };
+}
+
 let monitorChildProcess: ChildProcess | null = null;
 
 export async function monitor(onBlock: (block: MonBlock) => void): Promise<void> {
@@ -721,10 +751,13 @@ async function startInternal(stickConfig: MinimalAlphaConfigItem[]) {
   const debouncedProcessBatch = _.debounce(sequenceProcessBatch, 1000);
   const pingAlive = _.throttle(() => log('Alive', 0), 60000);
 
+  const isRoutingEvent = createRoutingEventFilter();
+
   await monitor((monBlock) => {
+    pingAlive();
+    if (!isRoutingEvent(monBlock)) return;
     newBatch.push(monBlock);
     debouncedProcessBatch();
-    pingAlive();
   });
 }
 
