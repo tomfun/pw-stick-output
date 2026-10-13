@@ -1,6 +1,6 @@
 {
   "name": "pw-stick-output",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "type": "module",
   "description": "TypeScript utility for managing PipeWire audio node connections and routing with systemd integration",
   "main": "dist/index.js",
