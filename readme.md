@@ -68,6 +68,79 @@ module.exports = [
 
 The `configHelper` function helps create connection mappings between PipeWire nodes and their ports.
 
+#### Config file formats
+
+`--config` accepts `.cjs`, `.mjs` and `.json`:
+
+- **`.cjs`** — `module.exports = [...]`. Helpers are available as globals or via
+  `require('pw-stick-output/configHelper')`.
+- **`.mjs`** — `export default [...]` (`module.exports` in an `.mjs` file fails with "Rename file to *.cjs").
+  Helpers are available as globals or via `import { configHelper } from 'pw-stick-output/configHelper'`.
+- **`.json`** — a plain array of config items (no helpers, see the item shape below).
+
+Globals: `configHelper`, `configHelperAppPlay`, `configHelperRecordForApp`.
+
+#### Routing by application
+
+Application streams get a new node and port ids every time the app restarts, and their port names
+(`pw-play:output_FL`) are not always unique. Instead of a port id you can point at an application:
+
+```javascript
+module.exports = [
+  // old syntax: port id -> port id
+  ...configHelper('output.eq_sven:output', 'alsa_output.pci-0000_00_1f.3.analog-stereo:playback'),
+
+  // app playback (its output_FL/FR ports) -> sink
+  ...configHelperAppPlay({ binName: 'mpv' }, 'input.eq_sven:playback'),
+
+  // source -> app recording (its input_FL/FR ports)
+  ...configHelperRecordForApp('alsa_input.pci-0000_00_1f.3.analog-stereo:capture', { binName: 'parec' }),
+
+  // by process id
+  ...configHelperAppPlay({ pid: 12345 }, 'audiorelay_virtual_null:playback'),
+];
+```
+
+`AppRef` is `{ binName?: string; pid?: number }` (at least one; both must match if both are given).
+
+- **`binName`** matches any of the node's `application.process.binary`, `application.name` or `node.name`.
+- **`pid`** matches `application.process.id`.
+
+What PipeWire reports differs by client type, check with `pw-cli info <node id>` (and its `client.id`):
+
+| App | `application.name` / `node.name` | `application.process.binary` |
+|---|---|---|
+| `pw-play`, `pw-record` (native) | `pw-play` / `pw-record` | `pw-cat` (on the Client object only) |
+| `paplay`, `parec` (pipewire-pulse) | `paplay` / `parec` | `pacat` |
+
+So `{ binName: 'pw-play' }`, `{ binName: 'paplay' }` and `{ binName: 'pacat' }` all work. Properties missing
+on a native client's node are taken from its Client object, including the pid.
+
+Rules:
+
+- If no node matches, nothing is changed (logged at INFO: `no node matched for app ...`).
+- If several nodes match **and** expose the wanted port (e.g. two `pw-play` instances), the item is skipped and
+  nothing is changed (logged at WARNING: `ambiguous app match ...`). A shared binary is fine when only one node
+  has the port: `pacat` resolves to `paplay` for playback and to `parec` for recording.
+- `configHelperRecordForApp` manages the **source's** outgoing links; other inputs of the recorder are left alone.
+- Several items for the same source port are merged: a link is removed only if no item wants it.
+
+Item shape (useful for `.json` configs). An endpoint is either `{ "findByid": "node:port_FL" }` or
+`{ "findByApp": { "binName": "paplay" }, "portKind": "output" | "input", "channel": "FL" }`:
+
+```json
+[
+  {
+    "findByApp": { "binName": "paplay" }, "portKind": "output", "channel": "FL",
+    "stickTo": [{ "findByid": "audiorelay_virtual_null:playback_FL" }],
+    "ignoreMonitors": true,
+    "ignore": { "object.path": { "match": "^PulseAudio Volume Control:" } }
+  }
+]
+```
+
+Stream nodes use `output_<CH>` (players) and `input_<CH>` (recorders) — `playback_<CH>` is a sink port name.
+
 Here's a concise README section for working with filters and WirePlumber:
 
 ### Working with PipeWire Filters and WirePlumber
@@ -137,7 +210,7 @@ module.exports = [
   ...configHelper('output.hcl_compressor:output', 'input.eq_after_comp:playback'),
   
   // Route to hardware output
-  ...configHelper('output.eq_after_comp:output', 'alsa_output.pci-0000_01_00.1.hdmi-stereo:playbook'),
+  ...configHelper('output.eq_after_comp:output', 'alsa_output.pci-0000_01_00.1.hdmi-stereo:playback'),
 ]
 ```
 
@@ -182,7 +255,7 @@ pw-stick-output/
 The package exports the following modules:
 
 - **Main module** (`./dist/index.js`): Core functionality
-- **Config Helper** (`./dist/configHelper.js`): Configuration utilities
+- **Config Helper** (`./dist/configHelper.js`): `configHelper`, `configHelperAppPlay`, `configHelperRecordForApp`
 
 ## Development
 

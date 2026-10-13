@@ -5,13 +5,20 @@ import { createRequire } from 'node:module';
 import { extname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { MinimalAlphaConfigItem } from './configHelper.js';
-import { configHelper } from './configHelper.js';
+import { configHelper, configHelperAppPlay, configHelperRecordForApp } from './configHelper.js';
 import start from './findModuleByName.js';
 
 const require = createRequire(import.meta.url);
 
 //   global in CJS  ↘︎              global in ESM
-(globalThis as typeof globalThis & { configHelper: typeof configHelper }).configHelper = configHelper;
+const g = globalThis as typeof globalThis & {
+  configHelper: typeof configHelper;
+  configHelperRecordForApp: typeof configHelperRecordForApp;
+  configHelperAppPlay: typeof configHelperAppPlay;
+};
+g.configHelper = configHelper;
+g.configHelperRecordForApp = configHelperRecordForApp;
+g.configHelperAppPlay = configHelperAppPlay;
 
 (async () => {
   let config: MinimalAlphaConfigItem[];

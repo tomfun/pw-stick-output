@@ -2,19 +2,25 @@ import _ from 'lodash';
 import type { ChildProcess, ExecOptions } from 'node:child_process';
 import { exec, spawn } from 'node:child_process';
 import notify from 'sd-notify';
-import { MinimalAlphaConfigItem } from './configHelper.js';
+import type { Endpoint, MinimalAlphaConfigItem } from './configHelper.js';
+import { hasAppEndpoints, isEndpointByApp } from './configHelper.js';
 import { log } from './log.js';
 
 export type ExecPromise = Promise<string> & { cp: ChildProcess };
 
 const controller = new AbortController();
 
+// `exec` timeout is in milliseconds. pw-cli/pw-link answer in ~0.1–0.3 s; 2 s leaves room for a busy graph.
+const EXEC_TIMEOUT_MS = 2_000;
+// `pw-cli list-objects Port` is the largest output (~65 KB with ~200 ports); keep generous headroom.
+const EXEC_MAX_BUFFER = 512 * 1024;
+
 export function pmExec(shell: string, options: ExecOptions = {}): ExecPromise {
   let cp: ChildProcess;
   const result = new Promise<string>((resolve, reject) => {
     cp = exec(
       shell,
-      { timeout: 60, maxBuffer: 100 * 1024, signal: controller.signal, ...options },
+      { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER, signal: controller.signal, ...options },
       (error, stdout, stderr) => {
         if (error) {
           log(`Error invoking ${shell}: ${stderr}`, 2);
@@ -132,6 +138,52 @@ export function extractNodes(output: string): BaseBlock[] {
 
   if (lastBlock) blocks.push(lastBlock);
   return blocks;
+}
+
+export function extractInfoProperties(output: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  let inProps = false;
+  for (const raw of output.split('\n')) {
+    const line = raw.trim().replace(/^\*\s*/, '').trim();
+    if (!line) continue;
+    if (line === 'properties:') {
+      inProps = true;
+      continue;
+    }
+    if (!inProps) continue;
+    const eqIdx = line.indexOf(' = ');
+    if (eqIdx < 0) {
+      // next section (e.g. 'params: (9)')
+      inProps = false;
+      continue;
+    }
+    const key = line.slice(0, eqIdx).trim();
+    let val = line.slice(eqIdx + 3).trim();
+    if (val.startsWith('"') && val.endsWith('"')) {
+      val = val.slice(1, -1);
+    }
+    result[key] = val;
+  }
+  return result;
+}
+
+/**
+ * Native PipeWire clients (pw-play, pw-record, pw-cat, …) keep `application.process.*`
+ * only on their Client object; the Node carries just `application.name`/`node.name`.
+ * pipewire-pulse clients duplicate them onto the Node. Fill the gaps from the Client
+ * without overriding anything the Node already states.
+ */
+export function mergeClientProps(node: BaseBlock, client: Record<string, string | undefined>): BaseBlock {
+  for (const key in client) {
+    if (!key.startsWith('application.')) continue;
+    if (node[key] === undefined && client[key] !== undefined) {
+      node[key] = client[key];
+    }
+  }
+  if (node['application.process.id'] === undefined && client['pipewire.sec.pid'] !== undefined) {
+    node['application.process.id'] = client['pipewire.sec.pid'];
+  }
+  return node;
 }
 
 export function findBlockIdBy(blocks: BaseBlock[], field: string, name: string): string | undefined {
@@ -318,10 +370,95 @@ interface InternalFromBlock {
   humanName: string;
 }
 
-interface InternalDiff {
+export interface InternalDiff {
   from: string;
   add: string[];
   rm: string[];
+}
+
+/**
+ * Several config items may resolve to the same source port (e.g. an id-based entry and an
+ * app-based entry for the same stream). Merge them so each port gets one batch:
+ * - add: union (a duplicate `pw-link` fails with "File exists" and aborts the batch);
+ * - rm: intersection — an existing link is dropped only if no entry wants it. An entry that
+ *   refused to remove anything (empty rm) therefore blocks removals for that port.
+ */
+export function mergeDiffs(diffs: InternalDiff[]): InternalDiff[] {
+  const byFrom = new Map<string, InternalDiff>();
+  for (const d of diffs) {
+    const prev = byFrom.get(d.from);
+    if (!prev) {
+      byFrom.set(d.from, { from: d.from, add: Array.from(new Set(d.add)), rm: Array.from(new Set(d.rm)) });
+      continue;
+    }
+    prev.add = Array.from(new Set([...prev.add, ...d.add]));
+    const rm = new Set(d.rm);
+    prev.rm = prev.rm.filter((r) => rm.has(r));
+  }
+  return Array.from(byFrom.values());
+}
+
+export function resolveEndpoint(
+  endpoint: Endpoint,
+  watchedObjects: Record<string, WatchMetada>,
+): string | undefined {
+  if (!isEndpointByApp(endpoint)) {
+    return endpoint.findByid;
+  }
+  const { findByApp, portKind, channel } = endpoint;
+  if (findByApp.binName === undefined && findByApp.pid === undefined) {
+    log(`findByApp requires binName or pid: ${JSON.stringify(findByApp)}`, 3);
+    return undefined;
+  }
+  const matchingNodeIds: string[] = [];
+  for (const id in watchedObjects) {
+    const meta = watchedObjects[id];
+    if (!('node' in meta)) continue;
+    const node = meta.node;
+    if (findByApp.binName !== undefined) {
+      const candidates = [
+        node['application.process.binary'],
+        node['application.name'],
+        node['node.name'],
+      ];
+      if (!candidates.includes(findByApp.binName)) continue;
+    }
+    if (findByApp.pid !== undefined) {
+      if (node['application.process.id'] !== String(findByApp.pid)) continue;
+    }
+    matchingNodeIds.push(node.id);
+  }
+  if (matchingNodeIds.length === 0) {
+    log(`no node matched for app ${JSON.stringify(findByApp)}`, 1);
+    return undefined;
+  }
+  // One process may own several nodes (e.g. paplay + parec are both `pacat`,
+  // pw-play + pw-record are both `pw-cat`). Only nodes that actually expose
+  // the wanted port are real candidates.
+  const wantedSuffix = `${portKind}_${channel}`;
+  const nodeIdSet = new Set(matchingNodeIds);
+  const portsByNode = new Map<string, string>();
+  for (const id in watchedObjects) {
+    const meta = watchedObjects[id];
+    if (!('port' in meta) || !meta.simple) continue;
+    const nodeId = meta.port['node.id'];
+    if (!nodeId || !nodeIdSet.has(nodeId)) continue;
+    if (meta.simple.type === wantedSuffix) {
+      portsByNode.set(nodeId, normalizePortName(meta.simple, 'simple'));
+    }
+  }
+  if (portsByNode.size === 0) {
+    log(`no port ${wantedSuffix} on nodes ${matchingNodeIds.join(',')} for app ${JSON.stringify(findByApp)}`, 1);
+    return undefined;
+  }
+  if (portsByNode.size > 1) {
+    log(
+      `ambiguous app match for ${JSON.stringify(findByApp)}: nodes ${Array.from(portsByNode.keys()).join(',')}`,
+      3,
+    );
+    return undefined;
+  }
+  return portsByNode.values().next().value;
 }
 
 async function watchChanges(stickConfig: MinimalAlphaConfigItem[], watchedObjects: Record<string, WatchMetada>) {
@@ -374,9 +511,13 @@ async function watchChanges(stickConfig: MinimalAlphaConfigItem[], watchedObject
   );
   const diffs = [] as InternalDiff[];
   for (const config of stickConfig) {
-    const portLinks = currentAllLinks[config.findByid];
+    const fromName = resolveEndpoint(config, watchedObjects);
+    if (!fromName) {
+      continue;
+    }
+    const portLinks = currentAllLinks[fromName];
     if (!portLinks) {
-      log(`port not found. skip diff, port: ${config.findByid}`, 1);
+      log(`port not found. skip diff, port: ${fromName}`, 1);
       continue;
     }
     if (config.ignoreMonitors) {
@@ -405,15 +546,21 @@ async function watchChanges(stickConfig: MinimalAlphaConfigItem[], watchedObject
       rm: [],
     } as InternalDiff;
     diffs.push(currentDiff);
+    const resolvedStickTo = config.stickTo.map((c) => resolveEndpoint(c, watchedObjects));
+    const stickToSimpleNames = new Set(resolvedStickTo.filter((n): n is string => !!n));
     // to remove
-    const stickToSimpleNames = new Set(config.stickTo.map((c) => c.findByid));
     for (const to of portLinks.to) {
       if (!stickToSimpleNames.has(normalizePortName(to.simpleLink.to, 'simple'))) {
         currentDiff.rm.push(normalizePortName(to.simpleLink.to, 'machine'));
       }
     }
     // to add
-    for (const { findByid } of config.stickTo) {
+    for (const findByid of resolvedStickTo) {
+      if (!findByid) {
+        // unresolved endpoint — don't risk removing valid links
+        currentDiff.rm = [];
+        continue;
+      }
       let existTo = false;
       for (const to of portLinks.to) {
         if (normalizePortName(to.simpleLink.to, 'simple') === findByid) {
@@ -428,17 +575,17 @@ async function watchChanges(stickConfig: MinimalAlphaConfigItem[], watchedObject
         (o) => 'port' in o && o.simple && normalizePortName(o.simple, 'simple') === findByid,
       ) as { simple: SimplePortBlock } | undefined;
       if (!portMeta) {
-        log(`port to add not found. not going to remove anythin, port: ${config.findByid} , to port: ${findByid}.`, 1);
+        log(`port to add not found. not going to remove anythin, port: ${fromName} , to port: ${findByid}.`, 1);
         currentDiff.rm = [];
         continue;
       }
       currentDiff.add.push(normalizePortName(portMeta.simple, 'machine'));
     }
   }
-  const filteredDiffs = diffs.filter((d) => d.add.length > 0 || d.rm.length > 0);
+  const filteredDiffs = mergeDiffs(diffs).filter((d) => d.add.length > 0 || d.rm.length > 0);
   if (filteredDiffs.length > 0) {
     // log('current links:\n' + toLines.join('\n'), 0);
-    log('diff to apply:\n' + JSON.stringify(diffs, null, 2), 0);
+    log('diff to apply:\n' + JSON.stringify(filteredDiffs, null, 2), 0);
   }
 
   for (const diffBatch of filteredDiffs) {
@@ -452,6 +599,40 @@ async function watchChanges(stickConfig: MinimalAlphaConfigItem[], watchedObject
     } catch (e) {
       log(e as Error, 1);
     }
+  }
+}
+
+/**
+ * `pw-cli list-objects` prints only registry (global) properties. Application identity
+ * (`application.process.binary`, `application.process.id`, …) is only available via
+ * `pw-cli info`, on the Node for pipewire-pulse clients and on the Client for native ones.
+ */
+async function enrichStreamNodes(nodes: BaseBlock[]): Promise<void> {
+  const streamNodes = nodes.filter((n) => n['media.class']?.startsWith('Stream/'));
+  const infoOf = (id: string) =>
+    pmExec(`pw-cli info ${id}`).then(
+      (out) => extractInfoProperties(out),
+      (err) => {
+        log(`Failed to enrich object ${id}: ${(err as Error).message}`, 1);
+        return null;
+      },
+    );
+  const nodeProps = await Promise.all(streamNodes.map((n) => infoOf(n.id)));
+  const clientIds = new Set<string>();
+  streamNodes.forEach((node, i) => {
+    const props = nodeProps[i];
+    if (props) Object.assign(node, props);
+    if (node['client.id']) clientIds.add(node['client.id']);
+  });
+  const clientList = Array.from(clientIds);
+  const clientProps = await Promise.all(clientList.map(infoOf));
+  const clients = new Map<string, Record<string, string>>();
+  clientList.forEach((id, i) => {
+    if (clientProps[i]) clients.set(id, clientProps[i]!);
+  });
+  for (const node of streamNodes) {
+    const client = node['client.id'] ? clients.get(node['client.id']) : undefined;
+    if (client) mergeClientProps(node, client);
   }
 }
 
@@ -493,6 +674,9 @@ async function startInternal(stickConfig: MinimalAlphaConfigItem[]) {
       watchedObjects[device.id] = { _changedType: null, _updatedAt: new Date(), device };
     }
     const nodes = extractNodes(outputNodes);
+    if (hasAppEndpoints(stickConfig)) {
+      await enrichStreamNodes(nodes);
+    }
     for (const node of nodes) {
       watchedObjects[node.id] = { _changedType: null, _updatedAt: new Date(), node };
     }
